@@ -495,23 +495,112 @@ JSON format:
 Score guide: 8-10 = strong project, 5-7 = worth watching, 1-4 = high risk/avoid."""
 
 
-def _default_analysis():
+def _rule_based_analysis(presale_data: dict) -> dict:
+    """Calculate a data-driven score from DexScreener metrics when AIVM is unavailable."""
+    score = 5
+    green_flags = []
+    red_flags   = []
+    notes       = []
+
+    try:
+        liq     = float(str(presale_data.get("liquidity_usd", "0")).replace(",", "") or 0)
+        vol     = float(str(presale_data.get("volume_24h",    "0")).replace(",", "") or 0)
+        mcap    = float(str(presale_data.get("market_cap_usd","0")).replace(",", "") or 0)
+        buys    = int(str(presale_data.get("buys_24h",   "0")).replace(",", "") or 0)
+        sells   = int(str(presale_data.get("sells_24h",  "0")).replace(",", "") or 0)
+        chg24   = float(str(presale_data.get("price_change_24h","0%")).replace("%","").replace(",","") or 0)
+        age_h   = float(str(presale_data.get("age_hours", "0")).replace(",","") or 0)
+
+        # Liquidity
+        if liq >= 100_000:
+            score += 2; green_flags.append(f"Strong liquidity: ${liq:,.0f}")
+        elif liq >= 25_000:
+            score += 1; green_flags.append(f"Decent liquidity: ${liq:,.0f}")
+        elif liq < 5_000 and liq > 0:
+            score -= 2; red_flags.append(f"Very low liquidity: ${liq:,.0f} — high rug risk")
+        elif liq < 25_000 and liq > 0:
+            score -= 1; red_flags.append(f"Low liquidity: ${liq:,.0f}")
+
+        # Buy/sell ratio
+        total_txns = buys + sells
+        if total_txns > 0:
+            ratio = buys / total_txns
+            if ratio >= 0.65:
+                score += 1; green_flags.append(f"Strong buy pressure: {buys} buys vs {sells} sells")
+            elif ratio <= 0.35:
+                score -= 1; red_flags.append(f"Heavy sell pressure: {buys} buys vs {sells} sells")
+
+        # Volume
+        if vol >= 500_000:
+            score += 1; green_flags.append(f"High 24h volume: ${vol:,.0f}")
+        elif vol < 1_000 and vol > 0:
+            score -= 1; red_flags.append(f"Very low trading volume: ${vol:,.0f}")
+
+        # Price change
+        if chg24 > 1000:
+            score -= 1; red_flags.append(f"Extreme 24h pump +{chg24:.0f}% — possible manipulation")
+        elif chg24 > 200:
+            notes.append(f"Large price move: +{chg24:.0f}% in 24h")
+        elif chg24 < -60:
+            score -= 1; red_flags.append(f"Heavy price drop: {chg24:.0f}% in 24h")
+
+        # Age
+        if age_h < 6:
+            score -= 1; red_flags.append(f"Extremely new token ({age_h:.1f}h old) — very high risk")
+        elif age_h < 24:
+            red_flags.append(f"New token ({age_h:.1f}h old) — exercise caution")
+
+        # Market cap sanity
+        if mcap > 0 and liq > 0:
+            mcap_liq_ratio = mcap / liq
+            if mcap_liq_ratio > 100:
+                red_flags.append(f"Market cap/liquidity ratio very high ({mcap_liq_ratio:.0f}x) — illiquid")
+
+    except Exception as e:
+        print(f"  [TopTen] rule-based scoring error: {e}")
+
+    score = max(1, min(10, score))
+    if score >= 7:
+        rec = "BUY"
+    elif score >= 5:
+        rec = "WATCH"
+    else:
+        rec = "AVOID"
+
+    if not green_flags:
+        green_flags = ["New token launch on DexScreener"]
+    if not red_flags:
+        red_flags = ["No exchange listing yet — DYOR"]
+
+    analysis_text = "Rule-based analysis from on-chain data. "
+    if notes:
+        analysis_text += " ".join(notes) + ". "
+    analysis_text += "AIVM deep analysis temporarily unavailable — always research independently before investing."
+
     return {
-        "score": 5,
-        "verdict": "Analysis unavailable — data could not be processed.",
-        "green_flags": ["Listed on active presale platform"],
-        "red_flags": ["Analysis incomplete — verify independently"],
-        "analysis": "AIVM analysis was unavailable for this presale. Please research this project independently using multiple sources before making any investment decision.",
-        "recommendation": "WATCH"
+        "score":          score,
+        "verdict":        f"Data-driven score based on liquidity, volume, and market activity.",
+        "green_flags":    green_flags,
+        "red_flags":      red_flags,
+        "analysis":       analysis_text,
+        "recommendation": rec,
+        "ai_analyzed":    False,
     }
+
+
+def _default_analysis():
+    return _rule_based_analysis({})
 
 
 def analyze_presale(presale_data: dict, attempt: int = 1) -> dict:
     """Run AIVM analysis on a single presale. Returns analysis dict. Retries once on timeout."""
+    # Always compute rule-based fallback first using actual data
+    fallback = _rule_based_analysis(presale_data)
+
     client = get_aivm_client()
     if not client:
-        print("  [TopTen] AIVM unavailable — returning default analysis")
-        return _default_analysis()
+        print("  [TopTen] AIVM unavailable — using rule-based score")
+        return fallback
 
     user_prompt = json.dumps(presale_data, indent=2, default=str)
     raw = None
@@ -540,7 +629,8 @@ def analyze_presale(presale_data: dict, attempt: int = 1) -> dict:
             print(f"  [TopTen] retrying after timeout...")
             time.sleep(5)
             return analyze_presale(presale_data, attempt=2)
-        return _default_analysis()
+        print(f"  [TopTen] falling back to rule-based score")
+        return fallback
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -925,10 +1015,20 @@ def refresh_presales():
                 "name":           p.get("name", "Unknown"),
                 "symbol":         p.get("symbol", "???"),
                 "chain":          p.get("chain", "Unknown"),
+                # DexScreener fields
+                "market_cap_usd": p.get("market_cap_usd", "N/A"),
+                "liquidity_usd":  p.get("liquidity_usd", "N/A"),
+                "volume_24h":     p.get("volume_24h", "N/A"),
+                "price_usd":      p.get("price_usd", "N/A"),
+                "price_change_24h": p.get("price_change_24h", "N/A"),
+                "buys_24h":       p.get("buys_24h", "N/A"),
+                "sells_24h":      p.get("sells_24h", "N/A"),
+                "age_hours":      p.get("age_hours", "N/A"),
+                "dex_url":        p.get("dex_url", ""),
+                "description":    p.get("description", ""),
+                # Legacy presale fields (for Pinksale compat)
                 "hard_cap":       p.get("hard_cap", "N/A"),
                 "soft_cap":       p.get("soft_cap", "N/A"),
-                "presale_rate":   p.get("presale_rate", "N/A"),
-                "listing_rate":   p.get("listing_rate", "N/A"),
                 "liquidity_lock": p.get("liquidity_lock", "N/A"),
                 "liquidity_pct":  p.get("liquidity_pct", "N/A"),
                 "total_raised":   p.get("total_raised", "N/A"),
