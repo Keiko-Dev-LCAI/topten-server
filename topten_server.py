@@ -287,7 +287,7 @@ class AIVMClient:
 
         # 8. Get relay token
         relay_token = None
-        deadline = time.time() + 120
+        deadline = time.time() + 180
         while time.time() < deadline:
             r = req.get(
                 f"{AIVM_GATEWAY}/api/sessions/{session_id}/token",
@@ -506,16 +506,17 @@ def _default_analysis():
     }
 
 
-def analyze_presale(presale_data: dict) -> dict:
-    """Run AIVM analysis on a single presale. Returns analysis dict."""
+def analyze_presale(presale_data: dict, attempt: int = 1) -> dict:
+    """Run AIVM analysis on a single presale. Returns analysis dict. Retries once on timeout."""
     client = get_aivm_client()
     if not client:
         print("  [TopTen] AIVM unavailable — returning default analysis")
         return _default_analysis()
 
     user_prompt = json.dumps(presale_data, indent=2, default=str)
+    raw = None
     try:
-        raw = client.chat(ANALYSIS_SYSTEM_PROMPT, user_prompt, timeout_secs=300)
+        raw = client.chat(ANALYSIS_SYSTEM_PROMPT, user_prompt, timeout_secs=420)
         # Strip any accidental markdown fences
         cleaned = re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
         # Find first { to last }
@@ -529,9 +530,16 @@ def analyze_presale(presale_data: dict) -> dict:
             if key not in result:
                 raise ValueError(f"Missing key: {key}")
         result["score"] = max(1, min(10, int(result["score"])))
+        print(f"  [TopTen] analysis success: score={result['score']}, rec={result['recommendation']}")
         return result
     except Exception as e:
-        print(f"  [TopTen] analysis parse failed: {e} | raw: {raw[:200] if 'raw' in dir() else 'N/A'}")
+        err_msg = str(e)
+        print(f"  [TopTen] analysis attempt {attempt} failed: {err_msg[:120]} | raw: {str(raw)[:100] if raw else 'None'}")
+        # Retry once on timeout
+        if attempt == 1 and ("Timeout" in err_msg or "timeout" in err_msg):
+            print(f"  [TopTen] retrying after timeout...")
+            time.sleep(5)
+            return analyze_presale(presale_data, attempt=2)
         return _default_analysis()
 
 
@@ -826,7 +834,7 @@ def fetch_presales() -> tuple:
     """Try DexScreener new launches first, fall back to CoinGecko. Returns (presales, source)."""
     presales = fetch_dexscreener_launches()
     if len(presales) >= 3:
-        return presales[:10], "dexscreener"
+        return presales[:5], "dexscreener"
 
     print("  [TopTen] DexScreener returned <3 items, trying CoinGecko...")
     presales = fetch_coingecko_trending()
