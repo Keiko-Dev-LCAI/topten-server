@@ -515,7 +515,7 @@ def analyze_presale(presale_data: dict) -> dict:
 
     user_prompt = json.dumps(presale_data, indent=2, default=str)
     try:
-        raw = client.chat(ANALYSIS_SYSTEM_PROMPT, user_prompt, timeout_secs=360)
+        raw = client.chat(ANALYSIS_SYSTEM_PROMPT, user_prompt, timeout_secs=120)
         # Strip any accidental markdown fences
         cleaned = re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
         # Find first { to last }
@@ -864,6 +864,14 @@ def refresh_presales():
         print(f"  [TopTen] Fetched {len(presales_raw)} presales from {source}")
         analyzed = []
 
+        # Save "in progress" state immediately so frontend shows something
+        save_cache({
+            "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source":       source,
+            "status":       "refreshing",
+            "presales":     [],
+        })
+
         for i, p in enumerate(presales_raw):
             print(f"  [TopTen] Analyzing {i+1}/{len(presales_raw)}: {p.get('name', '?')} ({p.get('symbol', '?')})")
             # Build clean dict for AIVM (exclude raw_data to keep prompt compact)
@@ -887,16 +895,20 @@ def refresh_presales():
                 "analysis":       analysis,
             }
             analyzed.append(entry)
+
+            # Save partial results after each presale so cards appear as they complete
+            save_cache({
+                "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "source":       source,
+                "status":       "refreshing" if i < len(presales_raw) - 1 else "complete",
+                "presales":     analyzed,
+            })
+            print(f"  [TopTen] Saved partial cache ({len(analyzed)} so far)")
+
             # Small delay between AIVM calls to avoid nonce conflicts
             if i < len(presales_raw) - 1:
                 time.sleep(3)
 
-        cache_data = {
-            "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "source":       source,
-            "presales":     analyzed,
-        }
-        save_cache(cache_data)
         print(f"  [TopTen] Refresh complete — {len(analyzed)} presales cached")
 
     except Exception as e:
