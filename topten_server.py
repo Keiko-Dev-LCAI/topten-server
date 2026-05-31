@@ -460,6 +460,26 @@ def get_aivm_client():
 # PRESALE ANALYSIS PROMPTS
 # ════════════════════════════════════════════════════════════════════════
 
+CUSTOM_ANALYSIS_SYSTEM_PROMPT = """You are an expert crypto presale analyst with deep knowledge of tokenomics, rug pull patterns, and DeFi risk assessment. Perform a thorough deep-dive analysis of this presale.
+
+Be specific and concrete. Identify exact red flags and green flags based on the data. Calculate implicit things: if presale rate is X and listing rate is Y, calculate the markup/dilution. If liquidity lock is only 30 days, flag it explicitly. If team tokens are >20%, flag it.
+
+Return ONLY valid JSON, no markdown, no code blocks:
+{
+  "score": <1-10>,
+  "verdict": "<one strong sentence overall verdict>",
+  "green_flags": ["<specific flag with numbers/details>"],
+  "red_flags": ["<specific flag with numbers/details>"],
+  "analysis": "<3-4 sentence detailed breakdown covering tokenomics, team allocation, liquidity, and timing risks>",
+  "recommendation": "BUY|WATCH|AVOID",
+  "risk_breakdown": {
+    "tokenomics": <1-10>,
+    "team_transparency": <1-10>,
+    "liquidity_safety": <1-10>,
+    "timing_risk": <1-10>
+  }
+}"""
+
 ANALYSIS_SYSTEM_PROMPT = """You are an expert crypto presale analyst. Analyze the presale data provided and return ONLY a valid JSON object. No markdown, no explanation, no code blocks — just raw JSON.
 
 JSON format:
@@ -513,6 +533,170 @@ def analyze_presale(presale_data: dict) -> dict:
     except Exception as e:
         print(f"  [TopTen] analysis parse failed: {e} | raw: {raw[:200] if 'raw' in dir() else 'N/A'}")
         return _default_analysis()
+
+
+# ════════════════════════════════════════════════════════════════════════
+# CUSTOM ANALYSIS HELPERS
+# ════════════════════════════════════════════════════════════════════════
+
+def parse_input_type(user_input: str) -> dict:
+    """Detect if input is a Pinksale URL, DxSale URL, contract address, or plain text."""
+    s = user_input.strip()
+    # Pinksale URL
+    for pattern in [
+        r'pinksale\.finance/(?:launchpad|presale)/([0-9a-fA-Fx]+)',
+        r'pinksale\.finance/.*?([0-9a-fA-F]{40,})',
+    ]:
+        m = re.search(pattern, s, re.IGNORECASE)
+        if m:
+            return {"type": "pinksale", "id": m.group(1), "raw": s}
+    # DxSale URL
+    if "dxsale" in s.lower() or "dx.app" in s.lower():
+        return {"type": "dxsale", "raw": s}
+    # Contract address
+    m = re.search(r'0x[0-9a-fA-F]{40}', s)
+    if m:
+        return {"type": "contract", "address": m.group(0), "raw": s}
+    # Plain text
+    return {"type": "text", "name": s, "raw": s}
+
+
+def fetch_pinksale_details(launchpad_id: str) -> dict:
+    """Fetch detailed launchpad data from Pinksale API."""
+    try:
+        resp = requests.get(
+            f"https://api.pinksale.finance/api/v1/launchpad/{launchpad_id}",
+            timeout=15,
+            headers={"User-Agent": "TopTen/1.0"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("data", data)
+    except Exception as e:
+        print(f"  [Analyze] Pinksale detail fetch failed: {e}")
+        return {}
+
+
+def check_contract(address: str, chain: str = "eth") -> dict:
+    """Check contract verification via Etherscan/BSCscan free API."""
+    result = {"address": address, "verified": False, "source_available": False}
+    if chain.lower() in ("bsc", "binance", "56"):
+        api_url = "https://api.bscscan.com/api"
+    else:
+        api_url = "https://api.etherscan.io/api"
+    try:
+        resp = requests.get(
+            api_url,
+            params={
+                "module":  "contract",
+                "action":  "getsourcecode",
+                "address": address,
+                "apikey":  "YourApiKeyToken",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") == "1" and data.get("result"):
+            src = data["result"][0]
+            result["verified"]         = bool(src.get("SourceCode"))
+            result["contract_name"]    = src.get("ContractName", "")
+            result["compiler_version"] = src.get("CompilerVersion", "")
+            result["source_available"] = bool(src.get("SourceCode"))
+    except Exception as e:
+        print(f"  [Analyze] Contract check failed: {e}")
+    return result
+
+
+def fetch_project_site(url: str) -> str:
+    """Fetch project homepage and return first 2000 chars of cleaned text."""
+    try:
+        resp = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
+        raw  = resp.text[:8000]
+        clean = re.sub(r'<[^>]+>', ' ', raw)
+        clean = re.sub(r'\s+', ' ', clean).strip()
+        return clean[:2000]
+    except Exception as e:
+        print(f"  [Analyze] Site fetch failed: {e}")
+        return ""
+
+
+def custom_analyze(user_input: str, chain: str = "auto") -> dict:
+    """Full pipeline: parse input, gather data, run AIVM, return result."""
+    parsed     = parse_input_type(user_input)
+    input_type = parsed["type"]
+    raw_data   = {}
+    project_name   = ""
+    chain_detected = chain
+
+    if input_type == "pinksale":
+        launchpad_id   = parsed["id"]
+        raw_data       = fetch_pinksale_details(launchpad_id)
+        token          = raw_data.get("token", raw_data.get("saleToken", {}))
+        project_name   = token.get("name", raw_data.get("name", f"Pinksale #{launchpad_id}"))
+        chain_detected = str(raw_data.get("chain", raw_data.get("network", chain)))
+        website = (raw_data.get("website")
+                   or raw_data.get("projectInfo", {}).get("website", ""))
+        if website:
+            site_text = fetch_project_site(website)
+            if site_text:
+                raw_data["_site_excerpt"] = site_text
+
+    elif input_type == "dxsale":
+        raw_data     = {"platform": "DxSale", "url": user_input}
+        project_name = "DxSale Presale"
+
+    elif input_type == "contract":
+        address      = parsed["address"]
+        contract_info = check_contract(address, chain)
+        raw_data     = contract_info
+        project_name = contract_info.get("contract_name") or (address[:10] + "...")
+
+    else:
+        raw_data     = {"query": parsed.get("name", user_input)}
+        project_name = parsed.get("name", user_input)
+
+    user_prompt = (
+        f"Presale Input: {user_input}\n"
+        f"Input Type: {input_type}\n"
+        f"Chain: {chain_detected}\n"
+        f"Project Name: {project_name}\n\n"
+        f"Gathered Data:\n{json.dumps(raw_data, indent=2, default=str)[:6000]}"
+    )
+
+    client = get_aivm_client()
+    if not client:
+        return {"success": False, "error": "AIVM analysis service temporarily unavailable."}
+
+    try:
+        raw_response = client.chat(CUSTOM_ANALYSIS_SYSTEM_PROMPT, user_prompt, timeout_secs=360)
+        cleaned = re.sub(r"```(?:json)?", "", raw_response).strip().strip("`").strip()
+        start = cleaned.find("{")
+        end   = cleaned.rfind("}") + 1
+        if start >= 0 and end > start:
+            cleaned = cleaned[start:end]
+        analysis = json.loads(cleaned)
+        for key in ("score", "verdict", "green_flags", "red_flags", "analysis", "recommendation", "risk_breakdown"):
+            if key not in analysis:
+                if key == "risk_breakdown":
+                    analysis["risk_breakdown"] = {
+                        "tokenomics": 5, "team_transparency": 5,
+                        "liquidity_safety": 5, "timing_risk": 5,
+                    }
+                else:
+                    raise ValueError(f"Missing key: {key}")
+        analysis["score"] = max(1, min(10, int(analysis["score"])))
+        return {
+            "success":      True,
+            "input_type":   input_type,
+            "project_name": project_name,
+            "chain":        chain_detected,
+            "raw_data":     raw_data,
+            "analysis":     analysis,
+        }
+    except Exception as e:
+        print(f"  [Analyze] Analysis failed: {e}")
+        return {"success": False, "error": f"Analysis failed: {str(e)}"}
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -778,6 +962,25 @@ def api_refresh():
         return jsonify({}), 200
     threading.Thread(target=refresh_presales, daemon=True).start()
     return jsonify({"status": "refresh started"})
+
+
+@app.route("/api/analyze", methods=["POST", "OPTIONS"])
+def api_analyze():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        body       = request.get_json(force=True, silent=True) or {}
+        user_input = str(body.get("input", "")).strip()
+        chain      = str(body.get("chain", "auto")).strip()
+        if not user_input:
+            return jsonify({"success": False, "error": "No input provided."})
+        if len(user_input) > 500:
+            return jsonify({"success": False, "error": "Input too long (max 500 characters)."})
+        result = custom_analyze(user_input, chain)
+        return jsonify(result)
+    except Exception as e:
+        print(f"  [Analyze] Endpoint error: {e}")
+        return jsonify({"success": False, "error": "Server error — please try again."})
 
 
 # ════════════════════════════════════════════════════════════════════════
