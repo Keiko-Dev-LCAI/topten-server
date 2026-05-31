@@ -607,19 +607,49 @@ def analyze_presale(presale_data: dict, attempt: int = 1) -> dict:
     raw = None
     try:
         raw = client.chat(ANALYSIS_SYSTEM_PROMPT, user_prompt, timeout_secs=420)
-        # Strip any accidental markdown fences
+        print(f"  [TopTen] AIVM raw response ({len(raw)} chars): {raw[:200]}")
+
+        # Strip markdown fences and whitespace
         cleaned = re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
         # Find first { to last }
         start = cleaned.find("{")
         end   = cleaned.rfind("}") + 1
         if start >= 0 and end > start:
             cleaned = cleaned[start:end]
-        result = json.loads(cleaned)
-        # Validate required keys
+
+        # Fix common model JSON mistakes:
+        # 1. Unescaped quotes inside string values — replace " that aren't field delimiters
+        # 2. Trailing commas before closing brackets
+        cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)  # trailing commas
+
+        # Try parsing as-is first
+        try:
+            result = json.loads(cleaned)
+        except json.JSONDecodeError:
+            # Fallback: extract fields with regex
+            print(f"  [TopTen] JSON parse failed, trying regex extraction")
+            result = {}
+            m = re.search(r'"score"\s*:\s*(\d+)', cleaned)
+            if m: result["score"] = int(m.group(1))
+            m = re.search(r'"recommendation"\s*:\s*"(BUY|WATCH|AVOID)"', cleaned, re.IGNORECASE)
+            if m: result["recommendation"] = m.group(1).upper()
+            m = re.search(r'"verdict"\s*:\s*"([^"]{10,})"', cleaned)
+            if m: result["verdict"] = m.group(1)
+            m = re.search(r'"analysis"\s*:\s*"([^"]{20,})"', cleaned)
+            if m: result["analysis"] = m.group(1)
+            # Extract arrays
+            for key in ("green_flags", "red_flags"):
+                m = re.search(r'"' + key + r'"\s*:\s*\[([^\]]*)\]', cleaned, re.DOTALL)
+                if m:
+                    items = re.findall(r'"([^"]+)"', m.group(1))
+                    result[key] = items if items else []
+
+        # Validate and fill missing keys
         for key in ("score", "verdict", "green_flags", "red_flags", "analysis", "recommendation"):
             if key not in result:
-                raise ValueError(f"Missing key: {key}")
+                raise ValueError(f"Missing key after extraction: {key}")
         result["score"] = max(1, min(10, int(result["score"])))
+        result["ai_analyzed"] = True
         print(f"  [TopTen] analysis success: score={result['score']}, rec={result['recommendation']}")
         return result
     except Exception as e:
