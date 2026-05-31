@@ -961,7 +961,7 @@ def fetch_presales() -> tuple:
     """Try DexScreener new launches first, fall back to CoinGecko. Returns (presales, source)."""
     presales = fetch_dexscreener_launches()
     if len(presales) >= 3:
-        return presales[:5], "dexscreener"
+        return presales[:10], "dexscreener"
 
     print("  [TopTen] DexScreener returned <3 items, trying CoinGecko...")
     presales = fetch_coingecko_trending()
@@ -1031,28 +1031,18 @@ def refresh_presales():
             return
 
         print(f"  [TopTen] Fetched {len(presales_raw)} presales from {source}")
+
+        # ── Pass 1: Rule-based scores on ALL tokens immediately ──────────
+        # This lets the frontend show all 10 cards right away while AIVM runs
         analyzed = []
-
-        # Save "in progress" state immediately so frontend shows something
-        save_cache({
-            "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "source":       source,
-            "status":       "refreshing",
-            "presales":     [],
-        })
-
         for i, p in enumerate(presales_raw):
-            print(f"  [TopTen] Analyzing {i+1}/{len(presales_raw)}: {p.get('name', '?')} ({p.get('symbol', '?')})")
-            # Build clean dict for AIVM (exclude raw_data to keep prompt compact)
             data_for_analysis = {k: v for k, v in p.items() if k != "raw_data"}
-            analysis = analyze_presale(data_for_analysis)
-
+            rule_analysis = _rule_based_analysis(data_for_analysis)
             entry = {
                 "id":             p.get("id", f"item_{i}"),
                 "name":           p.get("name", "Unknown"),
                 "symbol":         p.get("symbol", "???"),
                 "chain":          p.get("chain", "Unknown"),
-                # DexScreener fields
                 "market_cap_usd": p.get("market_cap_usd", "N/A"),
                 "liquidity_usd":  p.get("liquidity_usd", "N/A"),
                 "volume_24h":     p.get("volume_24h", "N/A"),
@@ -1063,7 +1053,6 @@ def refresh_presales():
                 "age_hours":      p.get("age_hours", "N/A"),
                 "dex_url":        p.get("dex_url", ""),
                 "description":    p.get("description", ""),
-                # Legacy presale fields (for Pinksale compat)
                 "hard_cap":       p.get("hard_cap", "N/A"),
                 "soft_cap":       p.get("soft_cap", "N/A"),
                 "liquidity_lock": p.get("liquidity_lock", "N/A"),
@@ -1071,24 +1060,46 @@ def refresh_presales():
                 "total_raised":   p.get("total_raised", "N/A"),
                 "end_time":       p.get("end_time", ""),
                 "source":         p.get("source", source),
-                "analysis":       analysis,
+                "analysis":       rule_analysis,
             }
             analyzed.append(entry)
 
-            # Save partial results after each presale so cards appear as they complete
+        # Save all 10 with rule-based scores immediately
+        save_cache({
+            "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source":       source,
+            "status":       "refreshing",
+            "presales":     analyzed,
+        })
+        print(f"  [TopTen] All {len(analyzed)} rule-based cards saved — starting AIVM upgrades")
+
+        # ── Pass 2: AIVM upgrade each card one by one ────────────────────
+        # Cards are already visible; this upgrades them with deeper AI analysis
+        ai_done = 0
+        for i, (entry, p) in enumerate(zip(analyzed, presales_raw)):
+            print(f"  [TopTen] AIVM upgrading {i+1}/{len(presales_raw)}: {p.get('name', '?')}")
+            data_for_analysis = {k: v for k, v in p.items() if k != "raw_data"}
+            aivm_analysis = analyze_presale(data_for_analysis)
+
+            entry["analysis"] = aivm_analysis
+            if aivm_analysis.get("ai_analyzed"):
+                ai_done += 1
+                print(f"  [TopTen] AIVM upgraded card {i+1} (ai_done={ai_done})")
+            else:
+                print(f"  [TopTen] AIVM fallback for card {i+1} — keeping rule-based")
+
+            is_last = (i == len(presales_raw) - 1)
             save_cache({
                 "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "source":       source,
-                "status":       "refreshing" if i < len(presales_raw) - 1 else "complete",
+                "status":       "complete" if is_last else "refreshing",
                 "presales":     analyzed,
             })
-            print(f"  [TopTen] Saved partial cache ({len(analyzed)} so far)")
 
-            # Small delay between AIVM calls to avoid nonce conflicts
-            if i < len(presales_raw) - 1:
+            if not is_last:
                 time.sleep(3)
 
-        print(f"  [TopTen] Refresh complete — {len(analyzed)} presales cached")
+        print(f"  [TopTen] Refresh complete — {len(analyzed)} cards, {ai_done} AI-analyzed")
 
     except Exception as e:
         print(f"  [TopTen] Refresh failed: {e}")
