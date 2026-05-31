@@ -515,7 +515,7 @@ def analyze_presale(presale_data: dict) -> dict:
 
     user_prompt = json.dumps(presale_data, indent=2, default=str)
     try:
-        raw = client.chat(ANALYSIS_SYSTEM_PROMPT, user_prompt, timeout_secs=120)
+        raw = client.chat(ANALYSIS_SYSTEM_PROMPT, user_prompt, timeout_secs=300)
         # Strip any accidental markdown fences
         cleaned = re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
         # Find first { to last }
@@ -703,47 +703,81 @@ def custom_analyze(user_input: str, chain: str = "auto") -> dict:
 # DATA FETCHING
 # ════════════════════════════════════════════════════════════════════════
 
-def fetch_pinksale() -> list:
-    """Fetch live presales from Pinksale API. Returns list of dicts."""
+def fetch_dexscreener_launches() -> list:
+    """Fetch top boosted new token launches from DexScreener with full market data."""
     try:
+        # Get top boosted tokens (new projects paying for visibility = presale-equivalent)
         resp = requests.get(
-            "https://api.pinksale.finance/api/v1/launchpad/list",
-            params={"type": "launchpad", "status": "live", "page": 1, "pageSize": 20},
+            "https://api.dexscreener.com/token-boosts/top/v1",
             timeout=20,
             headers={"User-Agent": "TopTen/1.0"},
         )
         resp.raise_for_status()
-        data = resp.json()
-        items = data.get("data", data.get("result", data.get("items", [])))
-        if not isinstance(items, list):
-            items = []
+        boosted = resp.json()
+        if not isinstance(boosted, list):
+            boosted = []
+
         presales = []
-        for item in items[:20]:
-            token = item.get("token", item.get("saleToken", {}))
-            name   = token.get("name", item.get("name", "Unknown"))
-            symbol = token.get("symbol", item.get("symbol", "???"))
-            chain  = item.get("chain", item.get("network", item.get("chainId", "Unknown")))
+        seen = set()
+        for item in boosted:
+            if len(presales) >= 15:
+                break
+            addr    = item.get("tokenAddress", "")
+            chain   = item.get("chainId", "unknown")
+            desc    = item.get("description", "")
+            dex_url = item.get("url", "")
+            if not addr or addr in seen:
+                continue
+            seen.add(addr)
+
+            # Fetch pair data for this token to get market metrics
+            try:
+                pr = requests.get(
+                    f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
+                    timeout=10,
+                    headers={"User-Agent": "TopTen/1.0"},
+                )
+                pairs = pr.json().get("pairs") or []
+                # Pick highest-liquidity pair
+                pairs_sorted = sorted(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0), reverse=True)
+                pair = pairs_sorted[0] if pairs_sorted else {}
+            except Exception:
+                pair = {}
+
+            base   = pair.get("baseToken", {})
+            name   = base.get("name", item.get("name", addr[:8]))
+            symbol = base.get("symbol", "???").upper()
+            liq    = pair.get("liquidity", {})
+            vol    = pair.get("volume", {})
+            chg    = pair.get("priceChange", {})
+            txns   = pair.get("txns", {})
+            created_ms = pair.get("pairCreatedAt", 0) or 0
+            age_hours  = round((time.time() - created_ms / 1000) / 3600, 1) if created_ms else None
+
             presale = {
-                "id":              str(item.get("id", item.get("address", f"ps_{name}"))),
-                "name":            name,
-                "symbol":          symbol,
-                "chain":           str(chain),
-                "hard_cap":        str(item.get("hardCap", item.get("hard_cap", "N/A"))),
-                "soft_cap":        str(item.get("softCap", item.get("soft_cap", "N/A"))),
-                "presale_rate":    str(item.get("presaleRate", item.get("presale_rate", "N/A"))),
-                "listing_rate":    str(item.get("listingRate", item.get("listing_rate", "N/A"))),
-                "liquidity_pct":   str(item.get("liquidityPercent", item.get("liquidity_percent", "N/A"))),
-                "liquidity_lock":  str(item.get("liquidityLockDays", item.get("liquidity_lock_days", "N/A"))) + " days",
-                "total_raised":    str(item.get("totalRaised", item.get("total_raised", item.get("raised", "N/A")))),
-                "start_time":      str(item.get("startTime", item.get("start_time", ""))),
-                "end_time":        str(item.get("endTime", item.get("end_time", ""))),
-                "source":          "pinksale",
-                "raw_data":        item,
+                "id":            addr,
+                "name":          name,
+                "symbol":        symbol,
+                "chain":         chain,
+                "market_cap_usd": str(pair.get("marketCap", pair.get("fdv", "N/A"))),
+                "liquidity_usd": str(liq.get("usd", "N/A")),
+                "volume_24h":    str(vol.get("h24", "N/A")),
+                "price_usd":     str(pair.get("priceUsd", "N/A")),
+                "price_change_1h":  str(chg.get("h1", "N/A")) + "%",
+                "price_change_24h": str(chg.get("h24", "N/A")) + "%",
+                "buys_24h":  str((txns.get("h24") or {}).get("buys", "N/A")),
+                "sells_24h": str((txns.get("h24") or {}).get("sells", "N/A")),
+                "age_hours": str(age_hours) if age_hours else "N/A",
+                "contract":  addr,
+                "dex_url":   dex_url,
+                "description": desc[:300] if desc else "",
+                "source":    "dexscreener",
             }
             presales.append(presale)
-        return presales
+
+        return presales[:10]
     except Exception as e:
-        print(f"  [TopTen] Pinksale fetch failed: {e}")
+        print(f"  [TopTen] DexScreener fetch failed: {e}")
         return []
 
 
@@ -789,12 +823,12 @@ def fetch_coingecko_trending() -> list:
 
 
 def fetch_presales() -> tuple:
-    """Try Pinksale first, fall back to CoinGecko. Returns (presales, source)."""
-    presales = fetch_pinksale()
+    """Try DexScreener new launches first, fall back to CoinGecko. Returns (presales, source)."""
+    presales = fetch_dexscreener_launches()
     if len(presales) >= 3:
-        return presales[:10], "pinksale"
+        return presales[:10], "dexscreener"
 
-    print("  [TopTen] Pinksale returned <3 items, trying CoinGecko...")
+    print("  [TopTen] DexScreener returned <3 items, trying CoinGecko...")
     presales = fetch_coingecko_trending()
     if presales:
         return presales[:10], "coingecko_trending"
