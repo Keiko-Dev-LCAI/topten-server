@@ -481,19 +481,21 @@ Return ONLY valid JSON, no markdown, no code blocks:
   }
 }"""
 
-ANALYSIS_SYSTEM_PROMPT = """You are an expert crypto presale analyst. Analyze the presale data provided and return ONLY a valid JSON object. No markdown, no explanation, no code blocks — just raw JSON.
+ANALYSIS_SYSTEM_PROMPT = """You are an expert crypto analyst. Analyze the token launch data and return ONLY a valid JSON object. No markdown, no explanation, no code blocks — just the raw JSON.
 
 JSON format:
 {
   "score": <integer 1-10>,
-  "verdict": "<one sentence overall verdict>",
-  "green_flags": ["<flag>", "<flag>", "<flag>"],
-  "red_flags": ["<flag>", "<flag>"],
-  "analysis": "<2-3 sentence detailed analysis>",
-  "recommendation": "<BUY / WATCH / AVOID>"
+  "token_type": "<Meme Coin | Utility Token | DeFi | GameFi | AI Token | NFT | Unknown>",
+  "verdict": "<one punchy sentence: what is this token and is it worth it>",
+  "green_flags": ["<specific flag with numbers>", "<flag>", "<flag>"],
+  "red_flags": ["<specific flag with numbers>", "<flag>", "<flag>"],
+  "analysis": "<4-5 sentences: 1) what this token is and its stated purpose, 2) liquidity and volume assessment, 3) buy/sell pressure and market activity, 4) key risks, 5) overall outlook>",
+  "recommendation": "<BUY | WATCH | AVOID>"
 }
 
-Score guide: 8-10 = strong project, 5-7 = worth watching, 1-4 = high risk/avoid."""
+Score guide: 8-10 = strong opportunity, 5-7 = worth watching, 1-4 = high risk or avoid.
+Be direct and specific. If it looks like a meme coin with no utility, say so. If liquidity is dangerously low, say the exact number. Do not be vague."""
 
 
 def _rule_based_analysis(presale_data: dict) -> dict:
@@ -637,6 +639,8 @@ def analyze_presale(presale_data: dict, attempt: int = 1) -> dict:
             if m: result["verdict"] = m.group(1)
             m = re.search(r'"analysis"\s*:\s*"([^"]{20,})"', cleaned)
             if m: result["analysis"] = m.group(1)
+            m = re.search(r'"token_type"\s*:\s*"([^"]+)"', cleaned)
+            if m: result["token_type"] = m.group(1)
             # Extract arrays
             for key in ("green_flags", "red_flags"):
                 m = re.search(r'"' + key + r'"\s*:\s*\[([^\]]*)\]', cleaned, re.DOTALL)
