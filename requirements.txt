@@ -1,0 +1,10 @@
+web3==7.6.0
+eth-account==0.13.7
+cryptography
+websocket-client
+flask
+flask-cors
+apscheduler
+requests
+gunicorn
+pytz
