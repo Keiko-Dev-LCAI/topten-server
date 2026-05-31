@@ -575,14 +575,14 @@ def _rule_based_analysis(presale_data: dict) -> dict:
     if not red_flags:
         red_flags = ["No exchange listing yet — DYOR"]
 
-    analysis_text = "Rule-based analysis from on-chain data. "
+    analysis_text = "⏳ AI analysis queued — score based on on-chain data (liquidity, volume, price action). "
     if notes:
         analysis_text += " ".join(notes) + ". "
-    analysis_text += "AIVM deep analysis temporarily unavailable — always research independently before investing."
+    analysis_text += "Full Lightchain AIVM breakdown will appear shortly — refresh automatically in progress."
 
     return {
         "score":          score,
-        "verdict":        f"Data-driven score based on liquidity, volume, and market activity.",
+        "verdict":        "⏳ Awaiting AI analysis — preliminary score shown",
         "green_flags":    green_flags,
         "red_flags":      red_flags,
         "analysis":       analysis_text,
