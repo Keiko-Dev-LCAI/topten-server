@@ -437,8 +437,9 @@ class AIVMClient:
 # AIVM CLIENT SINGLETON
 # ════════════════════════════════════════════════════════════════════════
 
-_aivm_client = None
-_aivm_lock   = threading.Lock()
+_aivm_client    = None
+_aivm_lock      = threading.Lock()
+_last_aivm_error = ""
 
 
 def get_aivm_client():
@@ -625,6 +626,8 @@ def analyze_presale(presale_data: dict, attempt: int = 1) -> dict:
         err_msg = str(e)
         print(f"  [TopTen] analysis attempt {attempt} failed: {err_msg[:120]} | raw: {str(raw)[:100] if raw else 'None'}")
         # Retry once on timeout
+        global _last_aivm_error
+        _last_aivm_error = err_msg[:300]
         if attempt == 1 and ("Timeout" in err_msg or "timeout" in err_msg):
             print(f"  [TopTen] retrying after timeout...")
             time.sleep(5)
@@ -1088,12 +1091,13 @@ def index():
 def health():
     cache = load_cache()
     return jsonify({
-        "status":       "ok",
-        "last_updated": cache.get("last_updated", "never"),
-        "count":        len(cache.get("presales", [])),
-        "source":       cache.get("source", "none"),
-        "aivm":         bool(get_aivm_client()),
-        "refresh_running": _refresh_running,
+        "status":           "ok",
+        "last_updated":     cache.get("last_updated", "never"),
+        "count":            len(cache.get("presales", [])),
+        "source":           cache.get("source", "none"),
+        "aivm":             bool(get_aivm_client()),
+        "refresh_running":  _refresh_running,
+        "last_aivm_error":  _last_aivm_error or "none",
     })
 
 
