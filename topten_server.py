@@ -714,20 +714,25 @@ def fetch_pinksale_details(launchpad_id: str) -> dict:
 
 def check_contract(address: str, chain: str = "eth") -> dict:
     """Check contract verification via Etherscan/BSCscan free API."""
+    import os as _os
     result = {"address": address, "verified": False, "source_available": False}
     if chain.lower() in ("bsc", "binance", "56"):
-        api_url = "https://api.bscscan.com/api"
+        api_url  = "https://api.bscscan.com/api"
+        api_key  = _os.environ.get("BSCSCAN_API_KEY", "")
     else:
-        api_url = "https://api.etherscan.io/api"
+        api_url  = "https://api.etherscan.io/api"
+        api_key  = _os.environ.get("ETHERSCAN_API_KEY", "")
+    params = {
+        "module":  "contract",
+        "action":  "getsourcecode",
+        "address": address,
+    }
+    if api_key:
+        params["apikey"] = api_key
     try:
         resp = requests.get(
             api_url,
-            params={
-                "module":  "contract",
-                "action":  "getsourcecode",
-                "address": address,
-                "apikey":  "YourApiKeyToken",
-            },
+            params=params,
             timeout=10,
         )
         resp.raise_for_status()
